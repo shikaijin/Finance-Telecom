@@ -72,9 +72,8 @@ proc sgplot data=telecom.CountByContract;
 	vbar Contract / response=CountByContract_NotChurn;
 run;
 
-data telecom.churn_newvar (drop=Age CLTV Churn_Score Customer_Status Total_Charges Total_Refunds  
-Total_Extra_Data_Charges Total_Long_Distance_Charges Internet_Service Avg_Monthly_Long_Distance_Charge);
-	set telecom.churn;
+data telecom.churn_newvar (drop=Age CLTV Churn_Score Customer_Status Churn_Label);
+	set telecom.churn (drop=Total_Charges Total_Refunds Total_Extra_Data_Charges Total_Long_Distance_Charges);
 	*definition of age band;
 	length  age_range CLTV_Category $ 20;
 	if Age lt 26 then
@@ -115,17 +114,7 @@ Total_Extra_Data_Charges Total_Long_Distance_Charges Internet_Service Avg_Monthl
 	else Tenure_in_Years=6;
 run;
 
-/*proc freq data=telecom.churn_newvar;*/
-/*	tables age_range;*/
-/*run;*/
-/**/
-/*proc sql;*/
-/*	create table telecom.Churn_by_age as*/
-/*		select age_range, sum(Churn_Value) AS Churned_Customer, sum(Churn_Value)/count(*) as RATE format=PERCENT7.2 from telecom.churn_newvar*/
-/*			group by age_range;*/
-/*quit;*/
 
-/*gbarline plot by char vars*/
 %macro Churn_Rate_by_Cat; 
 proc sql noprint;
 	select name into: char_var1- from dictionary.columns
@@ -133,7 +122,7 @@ proc sql noprint;
 quit;
 %do i=1 %to &sqlobs; 
 /*title "Churn Rate by &&char_var&i";*/
-PROC SQL noprint;
+PROC SQL;
 create table telecom.&&char_var&i as
 SELECT &&char_var&i, SUM(Churn_Value) AS Churned_Customer, COUNT(*)-SUM(Churn_Value) AS Active_Customer, SUM(Churn_Value)/COUNT(*) AS Churn_Rate FORMAT=PERCENT7.2
 FROM TELECOM.CHURN_newvar
@@ -161,6 +150,9 @@ proc gbarline data=telecom.&&char_var&i;
 	title h=10pt f=swiss "Churned Customer and Rate by &&char_var&i";
 run;
 quit;
+proc freq data=telecom.churn_newvar;
+	table Churn_Value * &&char_var&i/ chisq;
+run;
 %end;
 title;
 %mend; 
@@ -186,49 +178,23 @@ proc report data=telecom.RATE_with_CLTV nowd split="/";
 	define Cancelled_Account_Count/"Cancelled /Account Count" right;
 run;
 
-title;
 
-data telecom.elder;
-	set telecom.churn_newvar;
-
-	if Age >=65;
-RUN;
-
-data telecom.YOUNG;
-	set telecom.churn_newvar;
-
-	if Age <65;
-RUN;
-/*KM plot*/
-%macro kmplot(var=);
-	ods graphics on;
-
-	PROC LIFETEST DATA=TELECOM.CHURN_NEWVAR METHOD=KM;
-		TIME Tenure_in_Months*Churn_Value(0);
-		strata &var;
-	run;
-
-	ods graphics off;
-%mend;
-
-%kmplot(var=CLTV_Category);
-%kmplot(var=age_range);
-
-/*call macro numeric var */
 proc sql NUMBER;
 	select name into: num_var separated by ' ' from dictionary.columns
 		where libname='TELECOM' and memname='CHURN_NEWVAR'	and type='num' and findw(name,'Churn_Value')<1 and 
-findw(name, 'Tenure_in_Years')<1 and findw(name, 'Satisfaction_Score')<1 ;
+findw(name, 'Tenure_in_Years')<1 and findw(name, 'Satisfaction_Score')<1 and findw(name, 'Total_Revenue')<1 ;
 quit;
 /*Collinearlity*/
 PROC REG DATA=telecom.churn_newvar;
-   MODEL  Satisfaction_Score = &num_var / vif ;
+   MODEL  Satisfaction_Score = &num_var / CORRB ;
 RUN;
+
 /*call macro char var */
 proc sql number;
 	select name into: char_var separated by ' ' from dictionary.columns
 	where libname='TELECOM' and memname='CHURN_NEWVAR'	and type='char' and find(name, 'Churn')<1 and 
-find(name, 'Streaming')<1 and findw(name, 'Dependents')<1 and find(name, 'Referred')<1;
+find(name, 'Streaming')<1 and findw(name, 'Dependents')<1 and find(name, 'Referred')<1
+;
 quit;
 
 /*call macro var */
@@ -245,12 +211,11 @@ proc surveyselect data=telecom.sorted rate=0.7 outall out=telecom.sorted2 seed=1
 	strata Churn_Value;
 run;
 
-data telecom.train telecom.test;
+data telecom.train telecom.validation;
 	set telecom.sorted2;
-
 	if selected = 1 then
 		output telecom.train;
-	else output telecom.test;
+	else output telecom.validation;
 	drop selected;
 run;
 
@@ -258,37 +223,81 @@ proc freq data=telecom.train;
 	table Churn_Value;
 run;
 
-proc freq data=telecom.test;
+proc freq data=telecom.validation;
 	table Churn_Value;
 run;
 
-/*logistic regression modelling*/
-proc logistic data=telecom.train descending;
-	class &char_var;
-	model Churn_Value = &var / selection=stepwise;
+proc export data=telecom.train outfile='D:\Idata-global\Telecom Project\Tele-Projec\train.xlsx' 
+dbms=xlsx replace;
 run;
 
-/*logistic regression evaluation*/
-
-
-
-
-proc npar1way data=telecom.churn_newvar;
-	class Churn_Value Married;
-
-	/*	output out = telecom.pvalue wilcoxon;*/
+proc export data=telecom.validation outfile='D:\Idata-global\Telecom Project\Tele-Projec\validation.xlsx' dbms=xlsx replace;
 run;
-
-
-proc freq data=telecom.churn_newvar;
-	table Churn_Value*Multiple_Lines/ CHISQ;
-
+/*logistic regression model*/
+ods graphics on;
+proc logistic data = telecom.train descending;
+class &char_var / param = ref;
+Model Churn_Value = &var / selection = stepwise;
+score data=telecom.train out = telecom.Logit_Training fitstat outroc=troc;
+score data=telecom.validation out = telecom.Logit_Validation fitstat outroc=vroc;
 run;
+ods graphics off;
 
 
-
-
-PROC REG DATA=sashelp.cars;
-   MODEL MPG_City = EngineSize Weight Length Horsepower / corrb  ;
-RUN;
-
+/*random forest*/
+/*PROC HPFOREST DATA=telecom.train maxtrees=500 vars_to_try=3 seed=1234 trainfraction=0.7;*/
+/*    target Churn_Value / level=binary;*/
+/*    input  &num_var / level=interval;*/
+/*	input &char_var / level=nominal;*/
+/*/*    SCORE OUT=telecom.scored;*/*/
+/*/*	SAVE FILE='D:\Idata-global\Telecom Project\Tele-Projec\churn_forest.bin';*/*/
+/*/*ods output FitStatistics = fitstats;*/*/
+/*/*ods output VariableImportance = Variable_Importance;*/*/
+/*run;*/
+/**/
+/*proc hpforest data=sashelp.cars*/
+/*maxtrees= 500 vars_to_try=4*/
+/*seed=600 trainfraction=0.6*/
+/*maxdepth=50 leafsize=6;*/
+/*target Churn_Value/ level=interval;*/
+/*input &char_var/ level=interval;*/
+/*ods output fitstatistics = fit;*/
+/*run;*/
+/**/
+/*proc hp4score data=telecom.validation;*/
+/*	id Churn_Value;*/
+/*	score file='D:\Idata-global\Telecom Project\Tele-Projec\churn_forest.bin';*/
+/*	out=validation_scored;*/
+/*run;*/
+/**/
+/*proc hp4score data=samp;*/
+/*id MPG_City;*/
+/*score file= "FilePath\model_fit.bin"*/
+/*out=scored;*/
+/*run;*/
+/**/
+/*%let dependent_var = status;*/
+/*%let score_dataset = heart_test_scored;*/
+/*%let score_column = P_StatusAlive;*/
+/**/
+/*ods output WilcoxonScores=WilcoxonScore;*/
+/*proc npar1way wilcoxon data= &score_dataset.;*/
+/*class &dependent_var.;*/
+/*var  &score_column.;*/
+/*run;*/
+/**/
+/*data AUC;*/
+/*set WilcoxonScore end=eof;*/
+/*retain v1 v2 1;*/
+/*if _n_=1 then v1=abs(ExpectedSum - SumOfScores);*/
+/*v2=N*v2;*/
+/*if eof then do;*/
+/*d=v1/v2;*/
+/*Gini=d * 2;*/
+/*AUC=d+0.5;   */
+/*put AUC=  GINI=;*/
+/*keep AUC Gini;*/
+/*output;*/
+/*end;*/
+/*proc print noobs;*/
+/*run;*/
